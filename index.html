@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Night Survivor</title>
+<style>
+*{box-sizing:border-box}body{margin:0;overflow:hidden;background:#090b12;color:#fff;font-family:Arial,sans-serif;cursor:none}canvas{display:block}
+body.ui{cursor:default}
+#hud{position:fixed;top:12px;left:12px;z-index:2;background:#111827cc;padding:10px 14px;border:1px solid #374151;border-radius:10px;min-width:230px}
+#bar{height:8px;background:#35151a;border-radius:8px;margin-top:7px;overflow:hidden}#xp{height:100%;width:0;background:#4ade80}
+#help{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:#111827cc;padding:8px 14px;border-radius:8px;color:#cbd5e1;white-space:nowrap}
+#overlay{position:fixed;inset:0;z-index:5;display:none;align-items:center;justify-content:center;background:#050810cc}
+#overlay.show{display:flex}
+#panel{background:#111827;border:1px solid #374151;border-radius:14px;padding:26px 34px;text-align:center;min-width:290px}
+#panel h2{margin:0 0 10px}#panel p{margin:6px 0;color:#cbd5e1}
+#panel button{margin-top:16px;padding:10px 22px;font-size:16px;border:0;border-radius:8px;background:#3b82f6;color:#fff;cursor:pointer}
+#panel button:hover{background:#2563eb}
+.upgrade-grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;margin-top:16px}
+.upgrade-card{margin:0!important;text-align:left;min-height:120px;padding:14px!important;background:#1f2937!important;border:1px solid #4b5563!important}
+.upgrade-card:hover{background:#263449!important;border-color:#60a5fa!important}
+.upgrade-card small{color:#cbd5e1;line-height:1.35}
+@media(max-width:700px){.upgrade-grid{grid-template-columns:1fr}.upgrade-card{min-height:92px}}
+#xpMax{position:fixed;top:12px;right:12px;z-index:3;padding:9px 13px;border:1px solid #374151;border-radius:9px;background:#111827;color:#fff;cursor:pointer;font-weight:700;display:none}
+</style>
+</head>
+<body>
+<div id="hud"><b>🌙 NIGHT SURVIVOR</b><div id="stats"></div><div id="bar"><div id="xp"></div></div></div>
+<button id="xpMax" type="button">⭐ XP MAX</button>
+<div id="help">WASD / setas para mover • CLIQUE ESQUERDO para atirar • P ou ESC para pausar</div>
+<canvas id="game"></canvas>
+<div id="overlay"><div id="panel"></div></div>
+<script>
+"use strict";
+const c=document.querySelector("canvas"),ctx=c.getContext("2d");
+// camada escura da "noite" (desenhada num canvas à parte e colada por cima do mapa)
+const dark=document.createElement("canvas"),dctx=dark.getContext("2d");
+function resize(){c.width=innerWidth;c.height=innerHeight;dark.width=c.width;dark.height=c.height}addEventListener("resize",resize);resize();
+
+/* ===================== ESTADO GERAL ===================== */
+const STATES={MENU:"menu",PLAYING:"playing",PAUSED:"paused",LEVEL_UP:"levelUp",GAME_OVER:"gameOver"};
+
+const CHARACTERS={
+  guerreiro:{name:"Guerreiro",icon:"⚔️",hp:150,speed:205,weapon:"sword",desc:"Mais vida • começa com espada"},
+  mago:{name:"Mago",icon:"🔮",hp:90,speed:220,weapon:"magic",desc:"Menos vida • magia em área"},
+  arqueiro:{name:"Arqueiro",icon:"🏹",hp:100,speed:285,weapon:"arrow",desc:"Alta velocidade • flechas rápidas"}
+};
+
+// Limites para evitar vazamento de memória / queda de FPS.
+const LIMITS={maxEnemies:400,maxShots:300,maxGems:500,maxEffects:300,trailReserve:60,cullDist:2500};
+
+const game={
+  state:STATES.MENU,
+  character:"guerreiro",     // personagem selecionado
+  pendingLevelUps:0,      // level ups esperando escolha
+  time:0,                 // tempo de partida (só avança jogando)
+  kills:0
+};
+
+// Botão "XP MAX" (teste): só aparece com ?debug no endereço ou apertando a tecla 0.
+let DEBUG=location.search.indexOf("debug")>=0||location.hash.indexOf("debug")>=0;
+function refreshDebug(){document.querySelector("#xpMax").style.display=DEBUG?"block":"none"}
+
+function createPlayer(charId){
+  const ch=CHARACTERS[charId]||CHARACTERS.guerreiro;
+  return {
+    x:0,y:0,r:16,speed:ch.speed,hp:ch.hp,maxHp:ch.hp,xp:0,level:1,
+    weapon:ch.weapon,damage:3,fireRate:1,xpMult:1,xpRadius:70,
+    projectileCount:1,mageRadius:115,mageDamage:4,shotCooldown:0,regen:0,
+    upgrades:{}
+  };
+}
+let player=createPlayer(game.character);
+
+const keys={};
+const mouse={x:innerWidth/2,y:innerHeight/2};
+
+/* ===================== MAPA, LIMITES E CÂMERA ===================== */
+const MAP_FILE="mapa.png";   // imagem do mapa (fica na mesma pasta do index.html)
+const MAP_SCALE=4;           // quanto ampliar a imagem: maior número = mapa maior (e pixels maiores)
+const NIGHT={on:true,darkness:.5,lightRadius:420};   // escurece o mapa e deixa uma luz em volta do jogador
+
+const map={img:new Image(),ready:false,w:0,h:0};
+map.img.onload=()=>{
+  map.w=(map.img.naturalWidth||map.img.width)*MAP_SCALE;
+  map.h=(map.img.naturalHeight||map.img.height)*MAP_SCALE;
+  map.ready=map.w>0&&map.h>0;
+};
+map.img.onerror=()=>{map.ready=false;};   // sem imagem: o jogo cai na grade infinita de antes
+map.img.src=MAP_FILE;
+
+// Limites do mundo (o mapa fica centrado em 0,0). Sem mapa carregado não há limite.
+function bounds(){
+  if(!map.ready) return null;
+  return {minX:-map.w/2,maxX:map.w/2,minY:-map.h/2,maxY:map.h/2};
+}
+
+// A câmera segue o jogador, mas não mostra além das bordas do mapa.
+const cam={x:0,y:0};
+function updateCamera(){
+  const b=bounds();
+  let cx=player.x,cy=player.y;
+  if(b){
+    const hw=c.width/2,hh=c.height/2;
+    cx=(b.maxX-b.minX)<=c.width?0:Math.max(b.minX+hw,Math.min(b.maxX-hw,cx));
+    cy=(b.maxY-b.minY)<=c.height?0:Math.max(b.minY+hh,Math.min(b.maxY-hh,cy));
+  }
+  cam.x=cx;cam.y=cy;
+}
+
+/* ===================== ENTIDADES ===================== */
+// Todas as entidades ficam em listas dentro de "world".
+// Para remover uma entidade basta marcar e.dead=true: cleanup() tira todas de uma vez.
+const world={enemies:[],gems:[],shots:[],effects:[]};
+
+function addEntity(list,obj,cap){
+  if(list.length>=cap) return null;   // lista cheia: não cria
+  obj.dead=false;
+  list.push(obj);
+  return obj;
+}
+
+function compact(list,keep){
+  let j=0;
+  for(let i=0;i<list.length;i++){
+    const e=list[i];
+    if(keep(e)) list[j++]=e;
+  }
+  list.length=j;
+}
+
+function cleanup(){
+  const inRange=e=>Math.abs(e.x-player.x)<LIMITS.cullDist&&Math.abs(e.y-player.y)<LIMITS.cullDist;
+  compact(world.enemies,e=>!e.dead);
+  compact(world.shots,e=>!e.dead&&inRange(e));
+  compact(world.gems,e=>!e.dead&&inRange(e));
+  compact(world.effects,e=>!e.dead&&inRange(e));
+}
+
+function clearWorld(){
+  world.enemies.length=0;
+  world.gems.length=0;
+  world.shots.length=0;
+  world.effects.length=0;
+}
+
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function xpNeeded(level){return level*15}
+
+/* ===================== OVERLAY / ESTADOS ===================== */
+const overlay=document.querySelector("#overlay"),panel=document.querySelector("#panel");
+function showOverlay(html){panel.innerHTML=html;overlay.classList.add("show");document.body.classList.add("ui")}
+function hideOverlay(){overlay.classList.remove("show");document.body.classList.remove("ui")}
+
+function fmtTime(t){
+  const s=Math.floor(t);
+  return Math.floor(s/60)+":"+String(s%60).padStart(2,"0");
+}
+
+let last=performance.now();
+let spawn=0;
+
+const UPGRADES=[
+  {id:"damage",icon:"⚔️",name:"Dano",desc:"+20% de dano em seus ataques.",max:8},
+  {id:"maxhp",icon:"❤️",name:"Vida Máxima",desc:"+25 HP máximo e cura 25.",max:null},
+  {id:"speed",icon:"💨",name:"Velocidade",desc:"+10% de velocidade de movimento.",max:8},
+  {id:"xpRadius",icon:"🧲",name:"Ímã de XP",desc:"+30% no alcance de coleta de XP.",max:5},
+  {id:"regen",icon:"💚",name:"Regeneração",desc:"+0,5 HP por segundo.",max:null},
+  {id:"heal",icon:"✨",name:"Cura",desc:"Recupera 50% da vida máxima.",max:null},
+  {id:"projectileCount",icon:"🔹",name:"Projétil extra",desc:"+1 projétil por disparo.",max:3,characters:["arqueiro"]},
+  {id:"fireRate",icon:"⚡",name:"Velocidade de disparo",desc:"+20% de frequência de disparo.",max:8},
+  {id:"mageRadius",icon:"💥",name:"Mago • Raio da explosão",desc:"+20% no raio visual e no raio de dano.",max:5,characters:["mago"]},
+  {id:"mageDamage",icon:"🔮",name:"Mago • Dano da explosão",desc:"+20% no dano da explosão.",max:8,characters:["mago"]},
+  {id:"mageProjectiles",icon:"🌌",name:"Mago • Projétil mágico",desc:"+1 projétil mágico por disparo.",max:2,characters:["mago"]}
+];
+let levelChoices=[];
+let levelUpOpenedAt=0;
+
+function upgradeLevel(id){return player.upgrades[id]||0;}
+function canUseUpgrade(u){
+  if(u.characters&&!u.characters.includes(game.character)) return false;
+  return u.max===null||upgradeLevel(u.id)<u.max;
+}
+function pickLevelChoices(){
+  const pool=UPGRADES.filter(canUseUpgrade);
+  levelChoices=[];
+  while(levelChoices.length<3&&pool.length){
+    const i=Math.floor(Math.random()*pool.length);
+    levelChoices.push(pool.splice(i,1)[0]);
+  }
+}
+function applyUpgrade(id){
+  const u=UPGRADES.find(x=>x.id===id);
+  if(!u||!canUseUpgrade(u)) return false;
+  player.upgrades[id]=upgradeLevel(id)+1;
+  if(id==="damage"){player.damage*=1.20;player.mageDamage*=1.20;}   // vale para espada, flecha e magia
+  else if(id==="maxhp"){player.maxHp+=25;player.hp=Math.min(player.maxHp,player.hp+25);}
+  else if(id==="speed") player.speed*=1.10;
+  else if(id==="xpRadius") player.xpRadius*=1.30;
+  else if(id==="regen") player.regen+=0.5;
+  else if(id==="heal") player.hp=Math.min(player.maxHp,player.hp+player.maxHp*0.5);
+  else if(id==="projectileCount") player.projectileCount++;
+  else if(id==="fireRate") player.fireRate*=1.20;
+  else if(id==="mageRadius") player.mageRadius*=1.20;
+  else if(id==="mageDamage") player.mageDamage*=1.20;
+  else if(id==="mageProjectiles") player.projectileCount++;
+  return true;
+}
+function showLevelUp(){
+  pickLevelChoices();
+  levelUpOpenedAt=performance.now();
+  const gaining=player.level-game.pendingLevelUps+1;   // nível que está sendo ganho agora
+  showOverlay('<h2>⬆️ Nível '+gaining+'</h2><p>Escolha uma melhoria:</p><div class="upgrade-grid">'+
+    levelChoices.map((u,i)=>'<button class="upgrade-card" data-action="upgrade" data-upgrade="'+u.id+'"><b>'+String(i+1)+'. '+u.icon+' '+u.name+'</b><br><small>Nv '+(upgradeLevel(u.id)+1)+' → '+(upgradeLevel(u.id)+2)+'<br>'+u.desc+'</small></button>').join('')+
+    '</div>');
+}
+function setState(s){
+  game.state=s;
+  if(s===STATES.MENU){
+    clearWorld();
+    showOverlay('<h2>🌙 Escolha seu personagem</h2><p>Escolha um para começar:</p><div style="display:grid;gap:10px;margin-top:16px">'+
+      Object.entries(CHARACTERS).map(([id,ch])=>'<button data-action="character" data-character="'+id+'" style="text-align:left;padding:12px 16px;margin:0">'+ch.icon+' <b>'+ch.name+'</b><br><small>'+ch.desc+'</small></button>').join('')+
+      '</div>');
+  }else if(s===STATES.PLAYING){hideOverlay();last=performance.now();}
+  else if(s===STATES.PAUSED){showOverlay('<h2>⏸️ Pausado</h2><p>Pressione P ou ESC para continuar</p><button data-action="resume">Continuar</button>');}
+  else if(s===STATES.LEVEL_UP){showLevelUp();}
+  else if(s===STATES.GAME_OVER){showOverlay('<h2>💀 Fim de jogo</h2><p>'+CHARACTERS[game.character].name+' • Nível '+player.level+' • Tempo '+fmtTime(game.time)+' • Abates '+game.kills+'</p><button data-action="restart">Escolher personagem</button><p>(Enter ou R jogam de novo com o mesmo personagem)</p>');}
+}
+
+function togglePause(){
+  if(game.state===STATES.PLAYING) setState(STATES.PAUSED);
+  else if(game.state===STATES.PAUSED) setState(STATES.PLAYING);
+}
+
+function confirmLevelUp(upgradeId){
+  if(game.state!==STATES.LEVEL_UP) return;
+  if(performance.now()-levelUpOpenedAt<350) return;   // ignora clique acidental logo que o painel abre
+  if(!upgradeId||!levelChoices.some(u=>u.id===upgradeId)) return;
+  if(!applyUpgrade(upgradeId)) return;
+  game.pendingLevelUps=Math.max(0,game.pendingLevelUps-1);
+  if(game.pendingLevelUps>0) setState(STATES.LEVEL_UP); else setState(STATES.PLAYING);
+}
+
+function resetGame(){
+  clearWorld();
+  player=createPlayer(game.character);
+  game.time=0;
+  game.kills=0;
+  game.pendingLevelUps=0;
+  spawn=0;
+  updateCamera();
+  setState(STATES.PLAYING);
+}
+
+function startWithCharacter(id){
+  if(!CHARACTERS[id]) return;
+  game.character=id;
+  resetGame();
+}
+// Botão de teste: sobe 1 nível na hora e abre o painel de upgrades.
+function grantXpMax(){
+  if(game.state!==STATES.PLAYING) return;
+  player.xp=0;
+  player.level++;
+  game.pendingLevelUps++;
+  setState(STATES.LEVEL_UP);
+}
+function doAction(a,b){
+  if(a==="character") startWithCharacter(b.dataset.character);
+  else if(a==="resume"&&game.state===STATES.PAUSED) setState(STATES.PLAYING);
+  else if(a==="upgrade") confirmLevelUp(b.dataset.upgrade);
+  else if(a==="restart"&&game.state===STATES.GAME_OVER) setState(STATES.MENU);
+}
+overlay.addEventListener("click",e=>{
+  const b=e.target&&e.target.closest?e.target.closest("[data-action]"):null;
+  if(b) doAction(b.dataset.action,b);
+});
+document.querySelector("#xpMax").addEventListener("click",e=>{
+  grantXpMax();
+  if(e.currentTarget&&e.currentTarget.blur) e.currentTarget.blur();   // evita Espaço/Enter apertarem o botão de novo
+});
+
+/* ===================== ENTRADA ===================== */
+addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+  if(k===" "||k.startsWith("arrow")) e.preventDefault();
+  if(!e.repeat){
+    if(k==="0"){DEBUG=!DEBUG;refreshDebug();}
+    if(game.state===STATES.LEVEL_UP){
+      if(k==="1"||k==="2"||k==="3"){
+        e.preventDefault();
+        const index=Number(k)-1;
+        if(levelChoices[index]) confirmLevelUp(levelChoices[index].id);
+      }
+    }else{
+      if(k==="p"||k==="escape") togglePause();
+      else if(k==="enter"){
+        e.preventDefault();
+        if(game.state===STATES.GAME_OVER) resetGame();
+        else if(game.state===STATES.PAUSED) togglePause();
+      }else if(k==="r"&&game.state===STATES.GAME_OVER) resetGame();
+    }
+  }
+  keys[k]=true;
+});
+addEventListener("keyup",e=>{keys[e.key.toLowerCase()]=false});
+addEventListener("mousemove",e=>{mouse.x=e.clientX;mouse.y=e.clientY});
+
+// Um clique = um ataque. Só vale jogando (e não quando o clique é no botão de teste).
+addEventListener("mousedown",e=>{
+  if(e.target&&e.target.closest&&e.target.closest("#xpMax")) return;
+  if(e.button===0&&game.state===STATES.PLAYING) shoot();
+});
+
+// Perdeu o foco: solta todas as teclas (evita personagem "preso" andando) e pausa.
+function onFocusLost(){
+  for(const k in keys) keys[k]=false;
+  if(game.state===STATES.PLAYING) setState(STATES.PAUSED);
+}
+addEventListener("blur",onFocusLost);
+document.addEventListener("visibilitychange",()=>{if(document.hidden) onFocusLost()});
+
+/* ===================== JOGO ===================== */
+function spawnEnemy(){
+  const d=Math.max(c.width,c.height)*.65;
+  const b=bounds();
+  const inside=(x,y)=>!b||(x>b.minX+20&&x<b.maxX-20&&y>b.minY+20&&y<b.maxY-20);
+  const offScreen=(x,y)=>Math.abs(x-cam.x)>c.width/2+20||Math.abs(y-cam.y)>c.height/2+20;
+  let x=0,y=0,found=false;
+  // 1ª escolha: num anel em volta do jogador, dentro do mapa e fora da tela
+  for(let t=0;t<60&&!found;t++){
+    const a=Math.random()*Math.PI*2;
+    x=player.x+Math.cos(a)*d;y=player.y+Math.sin(a)*d;
+    found=inside(x,y)&&offScreen(x,y);
+  }
+  // 2ª escolha (jogador num canto, anel quase todo fora do mapa): ponto qualquer do mapa, fora da tela
+  for(let t=0;t<40&&!found&&b;t++){
+    x=b.minX+20+Math.random()*(b.maxX-b.minX-40);
+    y=b.minY+20+Math.random()*(b.maxY-b.minY-40);
+    found=offScreen(x,y);
+  }
+  // 3ª escolha (tela maior que o mapa): qualquer ponto dentro do mapa, longe do jogador
+  for(let t=0;t<40&&!found;t++){
+    const a=Math.random()*Math.PI*2,r=350+Math.random()*d;
+    x=player.x+Math.cos(a)*r;y=player.y+Math.sin(a)*r;
+    found=inside(x,y);
+  }
+  if(!found) return;
+  addEntity(world.enemies,{x,y,r:13,hp:2,speed:45+Math.random()*35},LIMITS.maxEnemies);
+}
+
+function addEffect(effect){
+  if(world.effects.length>=LIMITS.maxEffects) return null;
+  effect.dead=false;
+  world.effects.push(effect);
+  return effect;
+}
+function getAimAngle(){
+  const wx=cam.x+(mouse.x-c.width/2),wy=cam.y+(mouse.y-c.height/2);   // posição do mouse no mundo
+  return Math.atan2(wy-player.y,wx-player.x);
+}
+function addMagicLaunchFlash(){
+  const a=getAimAngle();
+  addEffect({type:"launch",x:player.x+Math.cos(a)*25,y:player.y+Math.sin(a)*25,life:.10,maxLife:.10,r:9});
+}
+function killEnemy(e){
+  e.dead=true;
+  game.kills++;
+  addEntity(world.gems,{x:e.x,y:e.y,r:6},LIMITS.maxGems);
+}
+function explodeMagic(x,y){
+  const radius=player.mageRadius;   // o MESMO raio vale para o dano e para a animação
+  const effect=addEffect({
+    type:"explosion",x,y,radius,life:.40,maxLife:.40,flashLife:.08,
+    particles:[]
+  });
+  const count=8+Math.floor(Math.random()*9);
+  if(effect){
+    for(let i=0;i<count;i++){
+      const a=Math.random()*Math.PI*2;
+      effect.particles.push({a,speed:70+Math.random()*130,size:3+Math.random()*3,life:.40,maxLife:.40});
+    }
+  }
+  for(const e of world.enemies){
+    if(e.dead) continue;
+    if(Math.hypot(e.x-x,e.y-y)<=radius){
+      e.hp-=player.mageDamage;
+      e.hitFlash=.10;
+      if(e.hp<=0) killEnemy(e);
+    }
+  }
+}
+function createMagicProjectile(angle){
+  return addEntity(world.shots,{
+    type:"magic",x:player.x,y:player.y,
+    vx:Math.cos(angle)*850,vy:Math.sin(angle)*850,
+    r:10,travel:0,maxTravel:950,life:2.0,spin:Math.random()*Math.PI*2,
+    dmg:player.mageDamage
+  },LIMITS.maxShots);
+}
+function shoot(){
+  if(player.shotCooldown>0) return;
+  const angle=getAimAngle();
+  player.shotCooldown=.18/player.fireRate;
+  if(player.weapon==="sword"){
+    for(const e of world.enemies){
+      if(e.dead) continue;
+      const d=dist(e,player),ea=Math.atan2(e.y-player.y,e.x-player.x);
+      const da=Math.atan2(Math.sin(ea-angle),Math.cos(ea-angle));
+      if(d<92&&Math.abs(da)<1.05){
+        e.hp-=player.damage;
+        e.hitFlash=.10;
+        if(e.hp<=0) killEnemy(e);
+      }
+    }
+    return;
+  }
+  if(player.weapon==="magic"){
+    addMagicLaunchFlash();
+    const count=Math.min(player.projectileCount,LIMITS.maxShots-world.shots.length);
+    const spread=.16;
+    for(let i=0;i<count;i++){
+      const offset=count===1?0:(i-(count-1)/2)*spread;
+      createMagicProjectile(angle+offset);
+    }
+    return;
+  }
+  if(player.weapon==="arrow"){
+    const count=Math.min(player.projectileCount,LIMITS.maxShots-world.shots.length);
+    const spread=.10;
+    for(let i=0;i<count;i++){
+      const offset=count===1?0:(i-(count-1)/2)*spread;
+      addEntity(world.shots,{type:"arrow",x:player.x,y:player.y,vx:Math.cos(angle+offset)*850,vy:Math.sin(angle+offset)*850,r:4,dmg:player.damage,life:2.5},LIMITS.maxShots);
+    }
+  }
+}
+
+function update(dt){
+  game.time+=dt;
+  player.shotCooldown=Math.max(0,player.shotCooldown-dt);
+  if(player.regen>0&&player.hp>0) player.hp=Math.min(player.maxHp,player.hp+player.regen*dt);
+  spawn-=dt;
+  if(spawn<=0){
+    spawnEnemy();
+    spawn=Math.max(.12,.75-game.time/180);
+  }
+
+  const dx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0);
+  const dy=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);
+  const n=Math.hypot(dx,dy)||1;
+  player.x+=dx/n*player.speed*dt;
+  player.y+=dy/n*player.speed*dt;
+  const bd=bounds();
+  if(bd){
+    player.x=Math.max(bd.minX+player.r,Math.min(bd.maxX-player.r,player.x));
+    player.y=Math.max(bd.minY+player.r,Math.min(bd.maxY-player.r,player.y));
+  }
+  updateCamera();
+
+  for(const e of world.enemies){
+    if(e.hitFlash>0) e.hitFlash=Math.max(0,e.hitFlash-dt);
+  }
+
+  for(const fx of world.effects){
+    fx.life-=dt;
+    if(fx.type==="trail"){fx.x+=fx.vx*dt;fx.y+=fx.vy*dt;}
+    if(fx.type==="explosion"&&fx.particles){
+      for(const q of fx.particles) q.life-=dt;
+    }
+    if(fx.life<=0) fx.dead=true;
+  }
+
+  for(const s of world.shots){
+    if(s.dead) continue;
+    s.life-=dt;
+    const oldX=s.x,oldY=s.y;
+    s.x+=s.vx*dt;
+    s.y+=s.vy*dt;
+    if(s.type==="magic"){
+      s.travel+=Math.hypot(s.x-oldX,s.y-oldY);
+      s.spin+=dt*5;
+      // o rastro nunca ocupa as últimas vagas: explosões sempre têm espaço para aparecer
+      if(world.effects.length<LIMITS.maxEffects-LIMITS.trailReserve){
+        addEffect({type:"trail",x:oldX,y:oldY,r:2+Math.random()*2,life:.25,maxLife:.25,vx:(Math.random()-.5)*18,vy:(Math.random()-.5)*18});
+      }
+      let hit=false;
+      for(const e of world.enemies){
+        if(!e.dead&&dist(e,s)<e.r+s.r){hit=true;break;}
+      }
+      if(hit||s.travel>=s.maxTravel||s.life<=0){
+        explodeMagic(s.x,s.y);
+        s.dead=true;
+      }
+    }else if(s.life<=0){
+      s.dead=true;
+    }
+  }
+
+  for(const e of world.enemies){
+    if(e.dead) continue;   // inimigo que acabou de morrer não se move nem machuca
+    const a=Math.atan2(player.y-e.y,player.x-e.x);
+    e.x+=Math.cos(a)*e.speed*dt;
+    e.y+=Math.sin(a)*e.speed*dt;
+    if(dist(e,player)<e.r+player.r) player.hp-=18*dt;
+  }
+
+  // Tiro x inimigo: magia explode no contato; flecha mantém dano direto.
+  for(const e of world.enemies){
+    if(e.dead) continue;
+    for(const s of world.shots){
+      if(s.dead||s.type==="magic") continue;
+      if(dist(e,s)<e.r+s.r){
+        e.hp-=s.dmg;
+        e.hitFlash=.10;
+        s.dead=true;
+        if(e.hp<=0){
+          killEnemy(e);
+          break;
+        }
+      }
+    }
+  }
+
+  // Gemas de XP
+  for(const g of world.gems){
+    if(g.dead) continue;
+    if(dist(g,player)<player.xpRadius){
+      const a=Math.atan2(player.y-g.y,player.x-g.x);
+      g.x+=Math.cos(a)*180*dt;
+      g.y+=Math.sin(a)*180*dt;
+    }
+    if(dist(g,player)<player.r+g.r){
+      g.dead=true;
+      player.xp+=player.xpMult;
+      while(player.xp>=xpNeeded(player.level)){
+        player.xp-=xpNeeded(player.level);
+        player.level++;
+        game.pendingLevelUps++;
+      }
+    }
+  }
+
+  cleanup();
+
+  // Fim de jogo tem prioridade sobre level up.
+  if(player.hp<=0){
+    player.hp=0;
+    setState(STATES.GAME_OVER);
+  }else if(game.pendingLevelUps>0){
+    setState(STATES.LEVEL_UP);
+  }
+}
+
+// Escurece o mapa (noite) deixando um círculo de luz em volta do jogador.
+function drawNight(){
+  if(!NIGHT.on) return;
+  dctx.globalCompositeOperation="source-over";
+  dctx.clearRect(0,0,dark.width,dark.height);
+  dctx.fillStyle="rgba(5,9,35,"+NIGHT.darkness+")";
+  dctx.fillRect(0,0,dark.width,dark.height);
+  const px=player.x-cam.x+c.width/2,py=player.y-cam.y+c.height/2;
+  dctx.globalCompositeOperation="destination-out";
+  const g=dctx.createRadialGradient(px,py,40,px,py,NIGHT.lightRadius);
+  g.addColorStop(0,"rgba(0,0,0,1)");
+  g.addColorStop(1,"rgba(0,0,0,0)");
+  dctx.fillStyle=g;
+  dctx.beginPath();dctx.arc(px,py,NIGHT.lightRadius,0,Math.PI*2);dctx.fill();
+  ctx.drawImage(dark,0,0);
+}
+
+function draw(){
+  updateCamera();
+  ctx.fillStyle="#05070d";   // fora do mapa
+  ctx.fillRect(0,0,c.width,c.height);
+
+  // chão: imagem do mapa (ou a grade antiga, se a imagem não carregar)
+  ctx.save();
+  ctx.translate(c.width/2-cam.x,c.height/2-cam.y);
+  if(map.ready){
+    ctx.imageSmoothingEnabled=false;   // pixels nítidos
+    ctx.drawImage(map.img,-map.w/2,-map.h/2,map.w,map.h);
+  }else{
+    ctx.fillStyle="#0b1020";
+    ctx.fillRect(cam.x-c.width/2,cam.y-c.height/2,c.width,c.height);
+    ctx.strokeStyle="#172033";
+    ctx.lineWidth=1;
+    const size=80;
+    const startX=Math.floor((cam.x-c.width/2)/size)*size;
+    const startY=Math.floor((cam.y-c.height/2)/size)*size;
+    for(let x=startX;x<cam.x+c.width/2+size;x+=size){
+      ctx.beginPath();ctx.moveTo(x,cam.y-c.height);ctx.lineTo(x,cam.y+c.height);ctx.stroke();
+    }
+    for(let y=startY;y<cam.y+c.height/2+size;y+=size){
+      ctx.beginPath();ctx.moveTo(cam.x-c.width,y);ctx.lineTo(cam.x+c.width,y);ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  drawNight();
+
+  // entidades por cima da noite (ficam sempre visíveis)
+  ctx.save();
+  ctx.translate(c.width/2-cam.x,c.height/2-cam.y);
+
+  for(const g of world.gems){
+    ctx.fillStyle="#4ade80";ctx.beginPath();ctx.arc(g.x,g.y,g.r,0,Math.PI*2);ctx.fill();
+  }
+  for(const s of world.shots){
+    if(s.type==="magic"){
+      const pulse=1+Math.sin(s.spin)*.12;
+      const rr=s.r*pulse;
+      const grad=ctx.createRadialGradient(s.x,s.y,1,s.x,s.y,rr*2.4);
+      grad.addColorStop(0,"#ffffff");
+      grad.addColorStop(.28,"#c4b5fd");
+      grad.addColorStop(.65,"#8b5cf6");
+      grad.addColorStop(1,"rgba(59,130,246,0)");
+      ctx.fillStyle=grad;
+      ctx.beginPath();ctx.arc(s.x,s.y,rr*2.4,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle="#ffffff";ctx.beginPath();ctx.arc(s.x,s.y,rr*.55,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle="#60a5fa";ctx.lineWidth=2;
+      for(let i=0;i<3;i++){
+        const a=s.spin+i*Math.PI*2/3;
+        const sr=rr*1.5;
+        ctx.beginPath();ctx.arc(s.x+Math.cos(a)*sr,s.y+Math.sin(a)*sr,1.5,0,Math.PI*2);ctx.stroke();
+      }
+    }else{
+      ctx.fillStyle="#fbbf24";ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fill();
+    }
+  }
+  for(const e of world.enemies){
+    ctx.fillStyle=e.hitFlash>0?"#ffffff":"#ef4444";
+    ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();
+  }
+  for(const fx of world.effects){
+    if(fx.type==="trail"){
+      ctx.globalAlpha=Math.max(0,fx.life/fx.maxLife);
+      ctx.fillStyle="#a78bfa";ctx.beginPath();ctx.arc(fx.x,fx.y,fx.r,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    }else if(fx.type==="launch"){
+      const p=Math.max(0,fx.life/fx.maxLife);
+      ctx.globalAlpha=p;
+      const grad=ctx.createRadialGradient(fx.x,fx.y,1,fx.x,fx.y,fx.r*(2-p));
+      grad.addColorStop(0,"#ffffff");grad.addColorStop(.4,"#c4b5fd");grad.addColorStop(1,"rgba(139,92,246,0)");
+      ctx.fillStyle=grad;ctx.beginPath();ctx.arc(fx.x,fx.y,fx.r*(2-p),0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    }else if(fx.type==="explosion"){
+      const p=Math.min(1,Math.max(0,1-fx.life/fx.maxLife));
+      const eased=1-Math.pow(1-p,3);
+      const r=fx.radius*eased;
+      ctx.save();
+      if(fx.life>fx.maxLife-fx.flashLife){
+        ctx.globalAlpha=Math.max(0,fx.life/fx.maxLife);
+        ctx.fillStyle="#ffffff";ctx.beginPath();ctx.arc(fx.x,fx.y,Math.min(35,fx.radius*.35),0,Math.PI*2);ctx.fill();
+      }
+      ctx.globalAlpha=Math.max(0,1-p)*.22;
+      ctx.fillStyle="#a855f7";ctx.beginPath();ctx.arc(fx.x,fx.y,r,0,Math.PI*2);ctx.fill();
+      ctx.globalAlpha=Math.max(0,1-p);
+      ctx.strokeStyle="#c4b5fd";ctx.lineWidth=7*(1-p)+2;
+      ctx.beginPath();ctx.arc(fx.x,fx.y,r,0,Math.PI*2);ctx.stroke();
+      for(const q of fx.particles){
+        const qLife=Math.max(0,q.life/fx.maxLife);
+        const qR=Math.max(0,q.speed*(1-qLife)*.35);
+        ctx.globalAlpha=qLife;
+        ctx.fillStyle="#ffffff";ctx.beginPath();ctx.arc(fx.x+Math.cos(q.a)*qR,fx.y+Math.sin(q.a)*qR,Math.max(.5,q.size*qLife),0,Math.PI*2);ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // Jogador
+  ctx.fillStyle="#60a5fa";
+  ctx.beginPath();ctx.arc(player.x,player.y,player.r,0,Math.PI*2);ctx.fill();
+
+  // Direção da arma: aponta EXATAMENTE para o mouse.
+  const angle=getAimAngle();
+  ctx.strokeStyle="#93c5fd";
+  ctx.lineWidth=7;
+  ctx.beginPath();
+  ctx.moveTo(player.x,player.y);
+  ctx.lineTo(player.x+Math.cos(angle)*30,player.y+Math.sin(angle)*30);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // Mira do mouse (só jogando; nos menus aparece o cursor normal)
+  if(game.state===STATES.PLAYING){
+    ctx.strokeStyle="#ffffff";
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.arc(mouse.x,mouse.y,8,0,Math.PI*2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(mouse.x-13,mouse.y);ctx.lineTo(mouse.x+13,mouse.y);
+    ctx.moveTo(mouse.x,mouse.y-13);ctx.lineTo(mouse.x,mouse.y+13);
+    ctx.stroke();
+  }
+
+  const dmgShown=player.weapon==="magic"?player.mageDamage:player.damage;
+  document.querySelector("#stats").textContent=CHARACTERS[game.character].icon+" "+CHARACTERS[game.character].name+" • HP "+Math.ceil(player.hp)+"/"+player.maxHp+" • Nível "+player.level+" • Dano "+dmgShown.toFixed(1)+" • Inimigos "+world.enemies.length+" • "+fmtTime(game.time);
+  document.querySelector("#xp").style.width=Math.min(100,player.xp/xpNeeded(player.level)*100)+"%";
+}
+
+function loop(now){
+  const dt=Math.min(.033,Math.max(0,(now-last)/1000));
+  last=now;
+  if(game.state===STATES.PLAYING) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+refreshDebug();
+setState(STATES.MENU);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
