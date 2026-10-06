@@ -26,7 +26,7 @@ const CONFIG={
   timing:{maxDt:.033},
   weapons:{
     sword:{cooldown:.18,range:92,damage:3,arc:.1,anim:.15},
-    magic:{cooldown:.18,speed:850,range:950,life:2,radius:85,damage:4,anim:.4,spread:.16,explosionChance:.55},
+    magic:{cooldown:.18,speed:600,range:950,life:2,radius:85,damage:3,anim:.4,spread:.16,explosionChance:1},
     arrow:{cooldown:.18,speed:850,life:2.5,damage:3,spread:.10}
   },
   automatic:{
@@ -75,7 +75,6 @@ const UPGRADES=[
   {id:"projectileCount",icon:"🔹",name:"Projétil extra",desc:"+1 flecha por disparo.",max:3,characters:["arqueiro"]},
   {id:"swordRange",icon:"🗡️",name:"Alcance da Espada",desc:"+15% no alcance da espada.",max:5,characters:["guerreiro"]},
   {id:"mageRadius",icon:"💥",name:"Mago • Raio da explosão",desc:"+20% no raio da explosão.",max:5,characters:["mago"]},
-  {id:"mageExplosionChance",icon:"🎯",name:"Mago • Chance de explosão",desc:"+9 pontos percentuais de chance de explodir.",max:5,characters:["mago"]},
   {id:"mageDamage",icon:"🔮",name:"Mago • Dano da explosão",desc:"+20% no dano da explosão.",max:8,characters:["mago"]},
   {id:"mageProjectiles",icon:"🌌",name:"Mago • Projétil mágico",desc:"+1 projétil mágico por disparo.",max:2,characters:["mago"]}
 ];
@@ -556,7 +555,6 @@ function applyUpgrade(id){
   else if(id==="projectileCount"){player.projectileCount++}
   else if(id==="swordRange"){player.swordRange*=1.15}
   else if(id==="mageRadius"){player.mageRadius*=1.20}
-  else if(id==="mageExplosionChance"){player.mageExplosionChance=Math.min(1,player.mageExplosionChance+0.09)}
   else if(id==="mageDamage"){player.mageDamage*=1.20}
   else if(id==="mageProjectiles"){player.projectileCount++}
   return true;
