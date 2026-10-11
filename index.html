@@ -277,18 +277,31 @@ function shoot(aimOverride=null){
   for(let i=0;i<count;i++){const off=count===1?0:(i-(count-1)/2)*CONFIG.weapons.arrow.spread;arrowProjectile(angle+off)}
 }
 
-/* Ataque básico automático: mantém a essência de survivor, sem exigir cliques. */
+/* Ataque básico automático: mira e dispara sem exigir cliques. */
 function updateCharacterAutoAttack(){
   if(!player||game.state!==STATES.PLAYING||player.shotCooldown>0)return;
   let target=null,best=Infinity;
-  const maxRange=player.weapon==="sword"?220:1200;
+  const maxRange=player.weapon==="sword"?220:CONFIG.weapons[player.weapon==="magic"?"magic":"arrow"].range;
   for(const e of world.enemies){
     if(e.dead)continue;
     const d=dist(player,e);
     if(d<best&&d<=maxRange){best=d;target=e}
   }
   if(!target)return;
-  shoot(Math.atan2(target.y-player.y,target.x-player.x));
+  const angle=Math.atan2(target.y-player.y,target.x-player.x);
+  /* O mago dispara diretamente aqui para não depender de entrada do mouse. */
+  if(player.weapon==="magic"){
+    player.shotCooldown=CONFIG.weapons.magic.cooldown/player.fireRate;
+    player.attackAnim=CONFIG.weapons.magic.anim;
+    const count=Math.min(player.projectileCount,CONFIG.limits.shots-world.shots.length);
+    addEffect({type:"launch",x:player.x+Math.cos(angle)*25,y:player.y+Math.sin(angle)*25,life:.1,maxLife:.1,r:12});
+    for(let i=0;i<count;i++){
+      const off=count===1?0:(i-(count-1)/2)*CONFIG.weapons.magic.spread;
+      magicProjectile(angle+off);
+    }
+    return;
+  }
+  shoot(angle);
 }
 
 /* 10.1 ARMAS AUTOMÁTICAS — Etapa 7 */
