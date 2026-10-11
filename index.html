@@ -278,19 +278,17 @@ function shoot(aimOverride=null){
 }
 
 /* Ataque básico automático: mantém a essência de survivor, sem exigir cliques. */
-function updateCharacterAutoAttack(dt){
-  if(!player||game.state!==STATES.PLAYING)return;
-  if(player.shotCooldown>0)return;
+function updateCharacterAutoAttack(){
+  if(!player||game.state!==STATES.PLAYING||player.shotCooldown>0)return;
   let target=null,best=Infinity;
-  const maxRange=player.weapon==="sword"?CONFIG.weapons.sword.range+70:650;
+  const maxRange=player.weapon==="sword"?220:1200;
   for(const e of world.enemies){
     if(e.dead)continue;
     const d=dist(player,e);
     if(d<best&&d<=maxRange){best=d;target=e}
   }
   if(!target)return;
-  const angle=Math.atan2(target.y-player.y,target.x-player.x);
-  shoot(angle);
+  shoot(Math.atan2(target.y-player.y,target.x-player.x));
 }
 
 /* 10.1 ARMAS AUTOMÁTICAS — Etapa 7 */
@@ -676,10 +674,10 @@ function updateGems(dt){
   for(const g of world.gems){if(g.dead)continue;const d=dist(g,player);if(d<=getXpRadius()&&d>0){const a=Math.atan2(player.y-g.y,player.x-g.x);g.x+=Math.cos(a)*CONFIG.xp.magnetSpeed*dt;g.y+=Math.sin(a)*CONFIG.xp.magnetSpeed*dt}if(dist(g,player)<=player.r+g.r){g.dead=true;player.xp+=(g.value||1)*player.xpMult;while(player.xp>=xpNeeded(player.level)){player.xp-=xpNeeded(player.level);player.level++;game.pendingLevelUps++}}}
 }
 function update(dt){
-  gameDt=dt;game.time+=dt;player.shotCooldown=Math.max(0,player.shotCooldown-dt);player.attackAnim=Math.max(0,player.attackAnim-dt);updateCharacterAutoAttack(dt);if(player.invuln>0)player.invuln=Math.max(0,player.invuln-dt);
+  gameDt=dt;game.time+=dt;player.shotCooldown=Math.max(0,player.shotCooldown-dt);player.attackAnim=Math.max(0,player.attackAnim-dt);if(player.invuln>0)player.invuln=Math.max(0,player.invuln-dt);
   if(player.regen>0)player.hp=Math.min(player.maxHp,player.hp+player.regen*dt);updateBuffs(dt);
   const dx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0),dy=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);if(dx||dy){const n=Math.hypot(dx,dy)||1;moveWithCollision(player,dx/n*getMoveSpeed()*dt,dy/n*getMoveSpeed()*dt);clampPlayerToMap();}
-  updateWaveDirector(dt);updateEnemies(dt);updateEnemyShots(dt);updateAutomaticWeapons(dt);updateAutomaticShots(dt);updateShots(dt);updateEffects(dt);updateGems(dt);updatePickups(dt);updateChests();cleanup();
+  updateWaveDirector(dt);updateEnemies(dt);updateCharacterAutoAttack();updateEnemyShots(dt);updateAutomaticWeapons(dt);updateAutomaticShots(dt);updateShots(dt);updateEffects(dt);updateGems(dt);updatePickups(dt);updateChests();cleanup();
   if(!Number.isFinite(player.x))player.x=0;if(!Number.isFinite(player.y))player.y=0;if(!Number.isFinite(player.hp))player.hp=player.maxHp;player.hp=clamp(player.hp,0,player.maxHp);updateCamera();
   if(player.hp<=0){setState(STATES.GAME_OVER);return}if(game.pendingLevelUps>0)setState(STATES.LEVEL_UP);
 }
