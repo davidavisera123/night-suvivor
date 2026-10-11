@@ -263,9 +263,9 @@ function magicProjectile(angle){
 function arrowProjectile(angle){
   return addEntity(world.shots,{type:"arrow",x:player.x,y:player.y,vx:Math.cos(angle)*CONFIG.weapons.arrow.speed,vy:Math.sin(angle)*CONFIG.weapons.arrow.speed,r:4,life:CONFIG.weapons.arrow.life,dmg:player.damage*getDamageMultiplier()},CONFIG.limits.shots);
 }
-function shoot(){
+function shoot(aimOverride=null){
   if(game.state!==STATES.PLAYING||player.shotCooldown>0)return;
-  const angle=getAimAngle();player.shotCooldown=CONFIG.weapons.sword.cooldown/player.fireRate;player.attackAnim=.15;
+  const angle=Number.isFinite(aimOverride)?aimOverride:getAimAngle();player.shotCooldown=CONFIG.weapons.sword.cooldown/player.fireRate;player.attackAnim=.15;
   if(player.weapon==="sword"){swordAttack(angle);return}
   if(player.weapon==="magic"){
     const count=Math.min(player.projectileCount,CONFIG.limits.shots-world.shots.length);
@@ -275,6 +275,22 @@ function shoot(){
   }
   const count=Math.min(player.projectileCount,CONFIG.limits.shots-world.shots.length);
   for(let i=0;i<count;i++){const off=count===1?0:(i-(count-1)/2)*CONFIG.weapons.arrow.spread;arrowProjectile(angle+off)}
+}
+
+/* Ataque básico automático: mantém a essência de survivor, sem exigir cliques. */
+function updateCharacterAutoAttack(dt){
+  if(!player||game.state!==STATES.PLAYING)return;
+  if(player.shotCooldown>0)return;
+  let target=null,best=Infinity;
+  const maxRange=player.weapon==="sword"?CONFIG.weapons.sword.range+70:650;
+  for(const e of world.enemies){
+    if(e.dead)continue;
+    const d=dist(player,e);
+    if(d<best&&d<=maxRange){best=d;target=e}
+  }
+  if(!target)return;
+  const angle=Math.atan2(target.y-player.y,target.x-player.x);
+  shoot(angle);
 }
 
 /* 10.1 ARMAS AUTOMÁTICAS — Etapa 7 */
@@ -627,7 +643,7 @@ addEventListener("keydown",e=>{
 });
 addEventListener("keyup",e=>{keys[e.key.toLowerCase()]=false});
 addEventListener("mousemove",e=>{mouse.x=e.clientX;mouse.y=e.clientY});
-addEventListener("mousedown",e=>{if(e.button===0&&!e.target.closest("#overlay")&&game.state===STATES.PLAYING)shoot()});
+// O combate principal é automático: o jogador se concentra em se mover e posicionar.
 addEventListener("blur",()=>{releaseKeys();if(game.state===STATES.PLAYING)setState(STATES.PAUSED)});
 document.addEventListener("visibilitychange",()=>{if(document.hidden){releaseKeys();if(game.state===STATES.PLAYING)setState(STATES.PAUSED)}});
 
@@ -660,7 +676,7 @@ function updateGems(dt){
   for(const g of world.gems){if(g.dead)continue;const d=dist(g,player);if(d<=getXpRadius()&&d>0){const a=Math.atan2(player.y-g.y,player.x-g.x);g.x+=Math.cos(a)*CONFIG.xp.magnetSpeed*dt;g.y+=Math.sin(a)*CONFIG.xp.magnetSpeed*dt}if(dist(g,player)<=player.r+g.r){g.dead=true;player.xp+=(g.value||1)*player.xpMult;while(player.xp>=xpNeeded(player.level)){player.xp-=xpNeeded(player.level);player.level++;game.pendingLevelUps++}}}
 }
 function update(dt){
-  gameDt=dt;game.time+=dt;player.shotCooldown=Math.max(0,player.shotCooldown-dt);player.attackAnim=Math.max(0,player.attackAnim-dt);if(player.invuln>0)player.invuln=Math.max(0,player.invuln-dt);
+  gameDt=dt;game.time+=dt;player.shotCooldown=Math.max(0,player.shotCooldown-dt);player.attackAnim=Math.max(0,player.attackAnim-dt);updateCharacterAutoAttack(dt);if(player.invuln>0)player.invuln=Math.max(0,player.invuln-dt);
   if(player.regen>0)player.hp=Math.min(player.maxHp,player.hp+player.regen*dt);updateBuffs(dt);
   const dx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0),dy=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);if(dx||dy){const n=Math.hypot(dx,dy)||1;moveWithCollision(player,dx/n*getMoveSpeed()*dt,dy/n*getMoveSpeed()*dt);clampPlayerToMap();}
   updateWaveDirector(dt);updateEnemies(dt);updateEnemyShots(dt);updateAutomaticWeapons(dt);updateAutomaticShots(dt);updateShots(dt);updateEffects(dt);updateGems(dt);updatePickups(dt);updateChests();cleanup();
